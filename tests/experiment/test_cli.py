@@ -394,3 +394,58 @@ def test_the_plan_shows_the_code_and_predicts_a_refusal(runner, tmp_path, monkey
     dirty = runner.invoke(experiment_main(_marker), ["--version", "2026.07.16"])
     assert dirty.exit_code == 0, dirty.output
     assert "--run refuses: 1 calendar-versioned artifact would build from uncommitted code" in dirty.output
+
+
+def _experiment(checkout: Path, slug: str, status: str) -> None:
+    path = checkout / "docs" / "experiments" / f"{slug}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"---\ndate: 2026-10-17\nstatus: {status}\nsummary: Does it work?\n---\n")
+    _git(checkout, "add", "docs")
+    _git(checkout, "commit", "-m", f"Open {slug}")
+
+
+def test_experiment_records_its_slug_and_leaves_the_fingerprint_alone(runner, tmp_path, monkeypatch, checkout):
+    monkeypatch.setenv("REPRO_PREFIX", str(tmp_path / "prefix"))
+    _experiment(checkout, "warmup", "open")
+    result = runner.invoke(experiment_main(_marker), ["--version", "2026.07.16", "--run", "--experiment", "warmup"])
+    assert result.exit_code == 0, result.output
+    record = read_record(str(tmp_path / "prefix" / "scratch" / "marker" / "2026.07.16"))
+    assert record.provenance.experiment == "warmup"
+    # The same recipe without the option is the same artifact: served from cache, not drifted.
+    again = runner.invoke(experiment_main(_marker), ["--version", "2026.07.16"])
+    assert again.exit_code == 0, again.output
+    assert "built" in again.output and "another recipe" not in again.output
+
+
+def test_experiment_refuses_a_slug_with_no_file(runner, checkout):
+    result = runner.invoke(experiment_main(_marker), ["--version", "dev", "--experiment", "warmpu"])
+    assert result.exit_code != 0
+    assert "docs/experiments/warmpu.md" in result.output
+
+
+def test_experiment_refuses_a_closed_experiment(runner, checkout):
+    _experiment(checkout, "warmup", "closed")
+    result = runner.invoke(experiment_main(_marker), ["--version", "dev", "--experiment", "warmup"])
+    assert result.exit_code != 0
+    assert "closed" in result.output
+
+
+def test_experiment_finds_the_docs_from_a_subdirectory(runner, tmp_path, monkeypatch, checkout):
+    monkeypatch.setenv("REPRO_PREFIX", str(tmp_path / "prefix"))
+    _experiment(checkout, "warmup", "open")
+    (checkout / "sub").mkdir()
+    monkeypatch.chdir(checkout / "sub")
+    result = runner.invoke(experiment_main(_marker), ["--version", "dev", "--experiment", "warmup"])
+    assert result.exit_code == 0, result.output
+
+
+def test_experiment_is_refused_outside_a_git_checkout(runner, tmp_path, monkeypatch):
+    outside = tmp_path / "outside"
+    (outside / "docs" / "experiments").mkdir(parents=True)
+    (outside / "docs" / "experiments" / "warmup.md").write_text(
+        "---\ndate: 2026-10-17\nstatus: open\nsummary: Does it work?\n---\n"
+    )
+    monkeypatch.chdir(outside)
+    result = runner.invoke(experiment_main(_marker), ["--version", "dev", "--experiment", "warmup"])
+    assert result.exit_code != 0
+    assert "Git checkout" in result.output

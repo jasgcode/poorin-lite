@@ -12,8 +12,9 @@ This module makes that a one-liner while wiring up the deferred-version machiner
   config field, repeatable), ``--sweep PATH=[V1, ...]`` (one trial per value, repeatable; several
   form a grid), ``--accept-drift NAME`` (keep an output whose recipe changed, repeatable),
   ``--run`` (build vs. print the plan), ``--show-config`` (the plan plus each returned artifact's
-  identity config), ``--max-concurrent``, ``--note TEXT`` (labels the run's code), and
-  ``--allow-uncommitted`` (build calendar artifacts from a snapshot). It builds the wrapped
+  identity config), ``--max-concurrent``, ``--note TEXT`` (labels the run's code), ``--experiment
+  SLUG`` (the open experiment in ``docs/experiments/`` the run is for), and ``--allow-uncommitted``
+  (build calendar artifacts from a snapshot). It builds the wrapped
   function's handle graph **inside** a :func:`~repro.execution.build_context.build_context`
   assembled from those options, so any builder that deferred its version (omitted ``version=``)
   resolves against them. It calls the wrapped function once per trial with an ``overrides`` keyword
@@ -61,6 +62,7 @@ import secrets
 import textwrap
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import click
@@ -68,6 +70,7 @@ import yaml
 from draccus.cfgparsing import parse_string
 
 from repro import settings
+from repro.docs import CLOSED, DOCS_DIR, RULES, DocError, Kind, experiment_status
 from repro.execution.artifact import (
     DriftAcceptanceError,
     FingerprintMismatchError,
@@ -81,7 +84,7 @@ from repro.execution.step_runner import DEFAULT_MAX_CONCURRENT, steps_to_build
 from repro.experiment.code_check import SHOWN_HASH_LENGTH, CodeVerdict, check_code, code_line, plan_lines, refusal
 from repro.experiment.overrides import Override, OverrideError, Overrides
 from repro.experiment.run_refs import RunRefError, resume_version
-from repro.provenance import Provenance, launched_as, save_snapshot
+from repro.provenance import Provenance, launched_as, read_git, save_snapshot
 
 BuildResult = ArtifactStep | Mapping[str, ArtifactStep] | list[ArtifactStep] | tuple[ArtifactStep, ...]
 BuildRunner = Callable[[list[ArtifactStep], int, frozenset[str]], None]
@@ -297,6 +300,12 @@ def build_options_with_runner(fn: Callable[..., BuildResult], runner: BuildRunne
         help="What this run tries, in a few words. It labels the run's code in place of the commit subject.",
     )
     @click.option(
+        "--experiment",
+        default=None,
+        metavar="SLUG",
+        help="The open experiment (docs/experiments/SLUG.md) this run is for; recorded in each run's provenance.",
+    )
+    @click.option(
         "--allow-uncommitted",
         is_flag=True,
         help="Build calendar-versioned artifacts from uncommitted code, saved as a snapshot commit.",
@@ -314,9 +323,12 @@ def build_options_with_runner(fn: Callable[..., BuildResult], runner: BuildRunne
         show_config: bool,
         max_concurrent: int,
         note: str | None,
+        experiment: str | None,
         allow_uncommitted: bool,
         **kwargs: Any,
     ) -> None:
+        if experiment is not None:
+            _check_experiment(experiment)
         if (default_version is None) == (resume_version is None):
             raise click.UsageError("pass exactly one of --version or --resume")
         if resume_version is not None:
@@ -354,7 +366,7 @@ def build_options_with_runner(fn: Callable[..., BuildResult], runner: BuildRunne
             )
         if show_config and do_run:
             raise click.UsageError("--show-config prints the plan; it cannot be combined with --run")
-        launch = dataclasses.replace(Provenance.capture(), note=note)
+        launch = dataclasses.replace(Provenance.capture(), note=note, experiment=experiment)
         check = check_code(launch, steps_to_build(specs), allow_uncommitted=allow_uncommitted)
         try:
             # A run reads every artifact's recorded recipe itself (lazy.run); only the plan and a
@@ -388,6 +400,26 @@ def build_options_with_runner(fn: Callable[..., BuildResult], runner: BuildRunne
             raise click.ClickException(str(e)) from e
 
     return wrapper
+
+
+def _check_experiment(slug: str) -> None:
+    """Refuse ``--experiment`` unless ``slug`` names an open experiment in the checkout's docs."""
+    top_level = read_git(["rev-parse", "--show-toplevel"]).strip()
+    if not top_level:
+        raise click.BadParameter("needs a Git checkout, whose docs/ holds the experiment", param_hint="--experiment")
+    relative = f"{DOCS_DIR}/{RULES[Kind.EXPERIMENT].directory}/{slug}.md"
+    try:
+        status = experiment_status(Path(top_level) / DOCS_DIR, slug)
+    except FileNotFoundError as e:
+        raise click.BadParameter(
+            f"no {relative}. Open the experiment there first (see {DOCS_DIR}/README.md).", param_hint="--experiment"
+        ) from e
+    except DocError as e:
+        raise click.BadParameter(str(e), param_hint="--experiment") from e
+    if status == CLOSED:
+        raise click.BadParameter(
+            f"{relative} is closed. Reopen it (status: open), or open a new experiment.", param_hint="--experiment"
+        )
 
 
 def build_options(fn: Callable[..., BuildResult]) -> Callable[..., None]:

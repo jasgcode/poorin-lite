@@ -27,6 +27,10 @@ def workspace(tmp_path, monkeypatch):
     shutil.copy(TEMPLATE / "experiments" / "toy_regression.py", repo / "experiments" / "toy_regression.py")
     (repo / "experiments" / "__init__.py").write_text("")
     shutil.copy(TEMPLATE / ".gitignore", repo / ".gitignore")
+    (repo / "docs" / "experiments").mkdir(parents=True)
+    (repo / "docs" / "experiments" / "toy-lr.md").write_text(
+        "---\ndate: 2026-10-17\nstatus: open\nsummary: Which learning rate fits the toy line?\n---\n"
+    )
     git = ["git", "-c", "user.name=t", "-c", "user.email=t@t"]
     subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
     subprocess.run([*git, "add", "."], cwd=repo, check=True)
@@ -97,6 +101,15 @@ def test_the_toy_pipeline_through_every_workflow_path(workspace):
     assert f"toy/train@{dev}" in _ok(_cli(repo, "repro.experiment.runs", "list"))
     shown = _ok(_cli(repo, "repro.experiment.runs", "show", f"toy/train@{token}"))
     assert dev in shown
+
+    # --experiment tags a run's records; runs list --experiment finds them.
+    out = _ok(_cli(repo, toy, "--version", "dev", "--experiment", "toy-lr", "--run"))
+    tagged = RUN_VERSION.search(out).group(1)
+    listed = _ok(_cli(repo, "repro.experiment.runs", "list", "--experiment", "toy-lr"))
+    assert sorted(line.split()[3].rsplit("/", 1)[-1] for line in listed.splitlines()) == [
+        f"data@{tagged}",
+        f"train@{tagged}",
+    ]
 
     # evaluate scores every checkpoint of the run; eval_results reads the scores back.
     _ok(

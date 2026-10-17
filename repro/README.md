@@ -19,6 +19,7 @@ design and the API.
 |---|---|
 | [`settings.py`](settings.py) | the prefix (`REPRO_PREFIX`, default `./artifacts`, made absolute) and the snapshot ref names |
 | [`provenance.py`](provenance.py) | the commit, branch, dirty files, and command line of a build; snapshot commits |
+| [`docs.py`](docs.py) | the project docs' headers and the generated `docs/index.md` |
 | [`accelerator.py`](accelerator.py) | `exclusive_accelerator`, one training or evaluation at a time per process |
 | [`execution/lazy.py`](execution/lazy.py) | `ArtifactStep`, `StepContext`, `run`, `resolve`, `apply` |
 | [`execution/fingerprint.py`](execution/fingerprint.py) | canonical JSON of a config and its hash; `register_fingerprint` |
@@ -146,7 +147,7 @@ real paths), `result` (a value artifact's fields), `fingerprint_payload`, `accep
 
 `provenance` holds `base_commit`, `branch`, `dirty`, `uncommitted` (the `git status` lines),
 `snapshot_commit`, `tree_hash`, `commit_subject`, `commit_time`, `built_by`, `git_remote`,
-`created_at`, `command_line`, and `note` (from `--note`). Outside a Git checkout the Git fields
+`created_at`, `command_line`, `note` (from `--note`), and `experiment` (from `--experiment`). Outside a Git checkout the Git fields
 are empty.
 
 ## Building
@@ -229,6 +230,7 @@ handle, a list, or a mapping). It adds:
 | `--show-config` | print the plan and each returned artifact's identity config |
 | `--max-concurrent N` | concurrent steps (default 8) |
 | `--note TEXT` | label the run's code in place of the commit subject |
+| `--experiment SLUG` | the open experiment (`docs/experiments/SLUG.md`) the run is for |
 | `--allow-uncommitted` | build calendar artifacts from a snapshot |
 
 A trial is one set of overrides; `--sweep` makes one trial per value. The wrapped function is
@@ -268,13 +270,13 @@ changes how the run executes (device, logging, workers) as a runtime arg.
 command line. Records and fingerprints hold only full versions.
 
 ```bash
-uv run python -m repro.experiment.runs list [FILTER] [--limit N]
+uv run python -m repro.experiment.runs list [FILTER] [--experiment SLUG] [--limit N]
 uv run python -m repro.experiment.runs show NAME@REF
 uv run python -m repro.experiment.runs migrate NAME@REF --to MODULE.CLASS [--drop PATH ...]
 ```
 
 `list` and `show` read only the records and status files, so they work without the experiment's
-code. `migrate` rewrites one record: it sets `result_type` to `--to` and removes the config fields
+code. `list --experiment SLUG` keeps the finished runs launched with `--experiment SLUG`. `migrate` rewrites one record: it sets `result_type` to `--to` and removes the config fields
 named by `--drop`. It accepts a run whose recorded type offers no suites (see Evaluation) or no
 longer imports (for
 example after renaming `src/project`). It refuses to switch a run between two types that both

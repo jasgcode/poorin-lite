@@ -3,7 +3,7 @@
 
 """List the runs under the prefix, show the code behind one, and migrate one's record.
 
-    uv run python -m repro.experiment.runs list [FILTER] [--limit N]
+    uv run python -m repro.experiment.runs list [FILTER] [--experiment SLUG] [--limit N]
     uv run python -m repro.experiment.runs show NAME@REF | PATH
     uv run python -m repro.experiment.runs migrate NAME@REF --to MODULE.CLASS [--drop PATH ...]
 
@@ -156,13 +156,30 @@ def main() -> None:
     """List the runs under the prefix, and show the code behind one."""
 
 
+def _experiment_of(run: Run) -> str | None:
+    """The experiment a finished run was launched for; ``None`` for one with no record or provenance yet."""
+    if run.record is None or run.record.provenance is None:
+        return None
+    return run.record.provenance.experiment
+
+
 @main.command("list")
 @click.argument("name_filter", required=False, default="")
 @click.option("--limit", type=click.IntRange(min=1), default=DEFAULT_LIMIT, show_default=True)
+@click.option(
+    "--experiment",
+    default=None,
+    metavar="SLUG",
+    help="Keep only finished runs launched with --experiment SLUG.",
+)
 @click.option("--prefix", default=None, help="Read this prefix instead of REPRO_PREFIX.")
-def list_runs(name_filter: str, limit: int, prefix: str | None) -> None:
+def list_runs(name_filter: str, limit: int, experiment: str | None, prefix: str | None) -> None:
     """One line per run, newest first; FILTER keeps runs whose name contains it."""
-    runs = [r for r in collect_runs(prefix or settings.prefix()) if name_filter in r.label][:limit]
+    runs = [
+        r
+        for r in collect_runs(prefix or settings.prefix())
+        if name_filter in r.label and (experiment is None or _experiment_of(r) == experiment)
+    ][:limit]
     width = max((len(r.label) for r in runs), default=0)
     for r in runs:
         click.echo(f"{r.when:%Y-%m-%d %H:%M}  {r.state:<7}  {r.label:<{width}}  {_code_label(r)}")

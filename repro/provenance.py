@@ -61,6 +61,7 @@ class Provenance:
             --porcelain`` codes), untracked files included; a rename is listed under its new path.
         snapshot_commit: The commit that saved the uncommitted changes (``save_snapshot``), if any.
         note: The launch's own description of what the run tries, if given.
+        experiment: The slug of the experiment (``docs/experiments/<slug>.md``) the launch ran for, if given.
     """
 
     tree_hash: str
@@ -76,6 +77,7 @@ class Provenance:
     uncommitted: tuple[str, ...] = ()
     snapshot_commit: str | None = None
     note: str | None = None
+    experiment: str | None = None
 
     @classmethod
     def capture(cls, repo_dir: Path | None = None) -> "Provenance":

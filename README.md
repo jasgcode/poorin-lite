@@ -31,6 +31,7 @@ default `./artifacts`) and the git ref namespace for dev snapshots.
 | `src/project/` | your code: models, environments, losses, checkpoint types, suites |
 | `experiments/` | pipelines that wire `src/` code into artifact steps |
 | `tests/` | tests for all three |
+| `docs/` | decisions, experiments, and designs ([rules](docs/README.md), [index](docs/index.md)) |
 
 ## The workflow
 
@@ -44,6 +45,7 @@ uv run python -m experiments.toy_regression --resume a1b2 --run      # continue 
 uv run python -m experiments.toy_regression --version 2026.10.17 --run   # a calendar version, from committed code
 uv run python -m experiments.toy_regression --version dev --set lr=0.1 --run
 uv run python -m experiments.toy_regression --version dev --sweep "lr=[0.01, 0.1]" --run
+uv run python -m experiments.toy_regression --version dev --experiment toy-lr --run   # a run for docs/experiments/toy-lr.md
 uv run python -m repro.experiment.runs list
 uv run python -m repro.experiment.runs show toy/train@a1b2
 uv run python -m repro.evaluation.evaluate toy/train@a1b2 --suite heldout_mse --steps all --version dev --run

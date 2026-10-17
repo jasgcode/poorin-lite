@@ -93,6 +93,17 @@ def test_list_filters_by_name(checkout, prefix):
     assert sorted(_labels(result.output)) == [f"data/toy{i}@2026.07.16" for i in range(3)]
 
 
+def test_list_filters_by_experiment(checkout, prefix):
+    clean = Provenance.capture()
+    _build("data/a", _at(dataclasses.replace(clean, experiment="warmup"), "2026-10-11T09:00:00"))
+    _build("data/b", _at(dataclasses.replace(clean, experiment="muon-vs-adam"), "2026-10-11T09:01:00"))
+    _build("data/c", _at(clean, "2026-10-11T09:02:00"))
+    _build("data/d", _at(dataclasses.replace(clean, experiment="warmup"), "2026-10-11T09:03:00"))
+    result = CliRunner().invoke(main, ["list", "--experiment", "warmup"])
+    assert result.exit_code == 0, result.output
+    assert _labels(result.output) == ["data/d@2026.07.16", "data/a@2026.07.16"]
+
+
 def test_list_limit_keeps_the_newest_runs(checkout, prefix):
     clean = Provenance.capture()
     _build("data/toy0", _at(clean, "2026-10-11T09:00:00"))
