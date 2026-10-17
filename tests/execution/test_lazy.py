@@ -1,0 +1,533 @@
+# Copyright The Marin Authors
+# SPDX-License-Identifier: Apache-2.0
+
+"""Behaviour tests for the artifact-step runtime (``repro.execution.lazy``).
+
+Drives the hardest path — a config that references its own output path AND a dependency's
+output path — end-to-end through the real ``StepRunner``, plus the ``apply`` sugar, the
+``resolve`` round-trip, and the ``name``/``version`` grammar.
+"""
+
+import os
+from dataclasses import dataclass, replace
+from pathlib import Path
+
+import pytest
+
+from repro.execution.artifact import Artifact, ArtifactTypeMismatchError, read_record
+from repro.execution.lazy import (
+    OUT,
+    ArtifactStep,
+    StepContext,
+    apply,
+    lower_all,
+    materialized_config,
+    resolve,
+    run,
+)
+
+# --- Toy configs/fns standing in for tokenize + train --------------------------
+
+
+@dataclass(frozen=True)
+class TokenizeCfg:
+    out: str  # self-reference: the producer writes here
+    source: str
+    tokenizer: str
+
+
+@dataclass(frozen=True)
+class TrainCfg:
+    out: str  # self-reference
+    data: str  # cross-step reference: the dep's output path
+    lr: float
+    steps: int
+
+
+class Tokens(Artifact):
+    out: str
+    source: str
+    tokenizer: str
+    kind: str = "tokens"
+
+
+class Ckpt(Artifact):
+    out: str
+    data: str
+    lr: float
+    steps: int
+    kind: str = "ckpt"
+
+
+def _make_tokens(config: TokenizeCfg) -> Tokens:
+    return Tokens(out=config.out, source=config.source, tokenizer=config.tokenizer)
+
+
+def _make_ckpt(config: TrainCfg) -> Ckpt:
+    return Ckpt(out=config.out, data=config.data, lr=config.lr, steps=config.steps)
+
+
+# --- How it looks: the user-facing experiment ----------------------------------
+
+
+def dclm_tokens() -> ArtifactStep[Tokens]:
+    return ArtifactStep(
+        name="datasets/dclm_tokens",
+        version="2026.06.25",
+        artifact_type=Tokens,
+        run=_make_tokens,
+        build_config=lambda ctx: TokenizeCfg(out=ctx.output_path, source="/raw/dclm", tokenizer="llama3"),
+    )
+
+
+def dclm_1b(*, lr: float = 3e-3) -> ArtifactStep[Ckpt]:
+    data = dclm_tokens()
+    return ArtifactStep(
+        name="checkpoints/dclm_1b",
+        version="2026.06.28",
+        artifact_type=Ckpt,
+        run=_make_ckpt,
+        build_config=lambda ctx: TrainCfg(out=ctx.output_path, data=ctx.artifact_path(data), lr=lr, steps=54931),
+        deps=(data,),
+    )
+
+
+# --- Identity vs execution -----------------------------------------------------
+
+
+def test_explicit_version_paths_and_cross_step_resolution():
+    prefix = "/data/spike"
+    train_cfg = materialized_config(dclm_1b(), prefix)
+    tokens_cfg = materialized_config(dclm_tokens(), prefix)
+
+    # Explicit name@version addressing, no hash.
+    assert tokens_cfg.out == "/data/spike/datasets/dclm_tokens/2026.06.25"
+    assert train_cfg.out == "/data/spike/checkpoints/dclm_1b/2026.06.28"
+    # The hard part: the consumer's config resolves to the producer's output path.
+    assert train_cfg.data == tokens_cfg.out
+
+
+def test_trailing_slash_prefix_writer_and_reader_agree(monkeypatch):
+    """With a trailing-slash ``REPRO_PREFIX``, the lowered step must write where consumers
+    resolve the output (``…marin/name/version``, not ``…marin//name/version``), or the reader
+    finds no record."""
+    monkeypatch.setenv("REPRO_PREFIX", "/data/marin/")
+    handle = dclm_tokens()
+    (spec,) = lower_all([handle])
+    assert spec.output_path == handle.path()
+    assert spec.output_path == "/data/marin/datasets/dclm_tokens/2026.06.25"
+
+
+def test_trailing_slash_prefix_resolves_relative_pin(monkeypatch):
+    """Same invariant for a relatively pinned handle (the ``override_path`` branch)."""
+    monkeypatch.setenv("REPRO_PREFIX", "/data/marin/")
+    pinned = apply("data/pinned", _stage, version="2026.06.28", pin="pinned/loc", output_path=OUT)
+    assert lower_all([pinned])[0].output_path == pinned.path()
+    assert pinned.path() == "/data/marin/pinned/loc"
+
+
+def test_shared_dep_is_lowered_once_per_graph():
+    """A handle several consumers share is lowered once, not once per path through it.
+
+    ``build_config`` is arbitrary user code (it can build a full training config), so
+    re-walking a shared subgraph re-runs it for every consumer — and compounds through
+    chained diamonds.
+    """
+    calls = 0
+
+    def counting_config(ctx: StepContext) -> TokenizeCfg:
+        nonlocal calls
+        calls += 1
+        return TokenizeCfg(out=ctx.output_path, source="/raw/dclm", tokenizer="llama3")
+
+    data = ArtifactStep(
+        name="datasets/dclm_tokens",
+        version="2026.06.25",
+        artifact_type=Tokens,
+        run=_make_tokens,
+        build_config=counting_config,
+    )
+
+    def consumer(lr: float) -> ArtifactStep[Ckpt]:
+        return ArtifactStep(
+            name=f"checkpoints/dclm_1b_{lr}",
+            version="2026.06.28",
+            artifact_type=Ckpt,
+            run=_make_ckpt,
+            build_config=lambda ctx: TrainCfg(out=ctx.output_path, data=ctx.artifact_path(data), lr=lr, steps=10),
+            deps=(data,),
+        )
+
+    left, right = consumer(1e-3), consumer(3e-3)
+    top = ArtifactStep(
+        name="checkpoints/merged",
+        version="2026.06.28",
+        artifact_type=Ckpt,
+        run=_make_ckpt,
+        build_config=lambda ctx: TrainCfg(
+            out=ctx.output_path, data=ctx.artifact_path(left) + ctx.artifact_path(right), lr=1e-4, steps=10
+        ),
+        deps=(left, right),
+    )
+
+    (spec,) = lower_all([top])
+    assert calls == 1
+    # Both branches point at the same lowered dep, so the runner sees one node.
+    assert spec.deps[0].deps[0] is spec.deps[1].deps[0]
+
+
+def test_fingerprint_is_prefix_independent_but_drift_sensitive(monkeypatch):
+    """The same pipeline under another ``REPRO_PREFIX`` must keep its identity; only the output
+    path carries the prefix."""
+    monkeypatch.setenv("REPRO_PREFIX", "/data/a")
+    base = dclm_1b().fingerprint()
+    central_path = dclm_1b().path()
+
+    monkeypatch.setenv("REPRO_PREFIX", "/data/b")
+    assert dclm_1b().fingerprint() == base
+    assert dclm_1b().path() != central_path
+    # A config value change must change the fingerprint (local drift).
+    assert dclm_1b(lr=1e-3).fingerprint() != base
+
+
+def test_dep_version_bump_changes_consumer_fingerprint():
+    """Bumping a dependency's version changes the consumer's fingerprint, because
+    build_config embeds ctx.artifact_path(dep) = name@version."""
+    before = dclm_1b().fingerprint()
+
+    def bumped() -> ArtifactStep[Ckpt]:
+        data = ArtifactStep(
+            name="datasets/dclm_tokens",
+            version="2026.07.01",  # bumped
+            artifact_type=Tokens,
+            run=_make_tokens,
+            build_config=lambda ctx: TokenizeCfg(out=ctx.output_path, source="/raw/dclm", tokenizer="llama3"),
+        )
+        return ArtifactStep(
+            name="checkpoints/dclm_1b",
+            version="2026.06.28",
+            artifact_type=Ckpt,
+            run=_make_ckpt,
+            build_config=lambda ctx: TrainCfg(out=ctx.output_path, data=ctx.artifact_path(data), lr=3e-3, steps=54931),
+            deps=(data,),
+        )
+
+    assert bumped().fingerprint() != before
+
+
+def test_runtime_arg_is_live_at_run_but_not_in_identity():
+    """A runtime arg is declared on the step and pulled via ``ctx.runtime_arg()``: it reaches the
+    config at run time but is a ``<key>`` placeholder at fingerprint time."""
+
+    def on(tpu: str) -> ArtifactStep[Artifact]:
+        return ArtifactStep(
+            name="checkpoints/dclm_1b",
+            version="2026.06.28",
+            artifact_type=Artifact,
+            run=_make_ckpt,
+            build_config=lambda ctx: TrainCfg(out=ctx.output_path, data=ctx.runtime_arg("tpu"), lr=3e-3, steps=10),
+            runtime_args={"tpu": tpu},
+        )
+
+    # Live at run time: the materialized config carries the declared value.
+    assert materialized_config(on("v5p-8"), "/data/b").data == "v5p-8"
+    # ...but excluded from identity: a different TPU is the same artifact.
+    assert on("v5p-8").fingerprint() == on("v6e-8").fingerprint()
+
+
+def test_pulling_an_undeclared_runtime_arg_fails_loudly():
+    art = ArtifactStep(
+        name="checkpoints/dclm_1b",
+        version="2026.06.28",
+        artifact_type=Artifact,
+        run=_make_ckpt,
+        build_config=lambda ctx: TrainCfg(out=ctx.output_path, data=ctx.runtime_arg("tpu"), lr=3e-3, steps=10),
+    )
+    with pytest.raises(KeyError, match="tpu"):
+        art.fingerprint()
+
+
+# --- name/version grammar ------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad", ["", "/leading", "trailing/", "has/../dots", "gs://scheme/x"])
+def test_malformed_name_is_rejected(bad):
+    with pytest.raises(ValueError):
+        ArtifactStep(
+            name=bad,
+            version="2026.06.28",
+            artifact_type=Artifact,
+            run=lambda c: None,
+            build_config=lambda ctx: None,
+        )
+
+
+@pytest.mark.parametrize("bad", ["", "v1", "llama3", "20260628", "2026-06-28"])
+def test_malformed_version_is_rejected(bad):
+    """A version must be a calendar version ``YYYY.MM.DD[.N]`` or ``dev``/``<label>-dev``."""
+    with pytest.raises(ValueError):
+        ArtifactStep(
+            name="ok",
+            version=bad,
+            artifact_type=Artifact,
+            run=lambda c: None,
+            build_config=lambda ctx: None,
+        )
+
+
+# --- end to end ----------------------------------------------------------------
+
+
+def test_end_to_end_through_step_runner(tmp_path, monkeypatch):
+    monkeypatch.setenv("REPRO_PREFIX", str(tmp_path))
+
+    run(dclm_1b())
+
+    tokens_path = f"{tmp_path}/datasets/dclm_tokens/2026.06.25"
+    ckpt_path = f"{tmp_path}/checkpoints/dclm_1b/2026.06.28"
+
+    saved_ckpt = Ckpt.raw_load(ckpt_path)
+    assert saved_ckpt.kind == "ckpt"
+    # The training run actually received the dependency's resolved output path.
+    assert saved_ckpt.data == tokens_path
+
+    assert Tokens.raw_load(tokens_path).kind == "tokens"
+
+    # Re-running is a cache hit (no error, idempotent).
+    run(dclm_1b())
+
+
+def test_record_names_its_dependencies_and_the_config_that_ran(tmp_path, monkeypatch):
+    """A record is walkable back to its inputs: ``deps`` names each by ``name@version``, and
+    ``config`` holds the materialized config, the dependency's resolved path included."""
+    monkeypatch.setenv("REPRO_PREFIX", str(tmp_path))
+    run(dclm_1b())
+
+    record = read_record(f"{tmp_path}/checkpoints/dclm_1b/2026.06.28")
+    assert record is not None
+    assert record.deps == ["datasets/dclm_tokens@2026.06.25"]
+    assert record.config is not None
+    assert record.config["data"] == f"{tmp_path}/datasets/dclm_tokens/2026.06.25"
+    assert read_record(record.config["data"]).name == "datasets/dclm_tokens"
+
+
+def test_resolve_round_trips_a_value_artifact(tmp_path, monkeypatch):
+    monkeypatch.setenv("REPRO_PREFIX", str(tmp_path))
+
+    result = resolve(dclm_tokens())
+    assert isinstance(result, Tokens)
+    assert (result.kind, result.tokenizer) == ("tokens", "llama3")
+    assert result.path == f"{tmp_path}/datasets/dclm_tokens/2026.06.25"
+
+
+def test_run_returns_loaded_artifacts(tmp_path, monkeypatch):
+    """run() builds and hands back each top-level handle's loaded, typed artifact, in order."""
+    monkeypatch.setenv("REPRO_PREFIX", str(tmp_path))
+    results = run(dclm_tokens())
+    assert len(results) == 1
+    assert isinstance(results[0], Tokens)
+    assert (results[0].kind, results[0].tokenizer) == ("tokens", "llama3")
+
+
+class OtherValue(Artifact):
+    note: str = ""
+
+
+def test_resolve_raises_on_result_type_drift(tmp_path, monkeypatch):
+    """A value artifact whose type changed under a reused version is a hard error at load."""
+    monkeypatch.setenv("REPRO_PREFIX", str(tmp_path))
+    resolve(dclm_tokens())  # records artifact type Tokens at this address
+
+    # The same recipe, so the drift check passes it: the type is not part of the fingerprint.
+    drifted = replace(dclm_tokens(), artifact_type=OtherValue, run=lambda cfg: OtherValue())
+    with pytest.raises(ArtifactTypeMismatchError):
+        resolve(drifted)
+
+
+# --- ctx.resolved: reading a dependency's value, and the declared-deps gate ----
+
+
+class TokenizerEcho(Artifact):
+    tokenizer: str = ""
+
+
+def _echo_tokenizer(config: dict) -> TokenizerEcho:
+    return TokenizerEcho(tokenizer=config["tokenizer"])
+
+
+def echo_consumer() -> ArtifactStep[TokenizerEcho]:
+    """A consumer that reads its dependency's recorded *value* (its tokenizer), not just its path."""
+    tok = dclm_tokens()
+
+    def build_config(ctx: StepContext) -> dict:
+        if ctx.is_fingerprint:
+            return {"tokenizer": "<tokenizer>"}
+        return {"tokenizer": ctx.resolved(tok).tokenizer}
+
+    return ArtifactStep(
+        name="checkpoints/echo",
+        version="2026.06.28",
+        artifact_type=TokenizerEcho,
+        run=_echo_tokenizer,
+        build_config=build_config,
+        deps=(tok,),
+    )
+
+
+def test_consumer_reads_dependency_value_via_ctx_resolved(tmp_path, monkeypatch):
+    monkeypatch.setenv("REPRO_PREFIX", str(tmp_path))
+    run(echo_consumer())
+    saved = TokenizerEcho.raw_load(f"{tmp_path}/checkpoints/echo/2026.06.28")
+    # The dep's tokenizer flowed from its record into the consumer's output.
+    assert saved.tokenizer == "llama3"
+
+
+def test_consumer_resolves_dependency_under_relative_prefix(tmp_path, monkeypatch):
+    """A relative ``REPRO_PREFIX`` (the tutorials' ``local_store``) must resolve a dependency's
+    record. The dep's path is joined onto the prefix and still looks relative, so an unanchored
+    prefix was applied again on read and the record came back missing."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("REPRO_PREFIX", "local_store")
+    run(echo_consumer())
+    saved = TokenizerEcho.raw_load(f"{tmp_path}/local_store/checkpoints/echo/2026.06.28")
+    assert saved.tokenizer == "llama3"
+
+
+def test_resolved_caches_the_loaded_artifact(tmp_path, monkeypatch):
+    monkeypatch.setenv("REPRO_PREFIX", str(tmp_path))
+    tok = dclm_tokens()
+    run(tok)  # materialize the dep so its record exists
+    ctx = StepContext.for_run(output_path="o", prefix=str(tmp_path), deps=(tok,))
+    first = ctx.resolved(tok)
+    # Resolving the same dep again returns the cached object — one store read, not N.
+    assert ctx.resolved(tok) is first
+    assert first.tokenizer == "llama3"
+
+
+def test_resolved_unavailable_at_fingerprint_time():
+    tok = dclm_tokens()
+    ctx = StepContext.for_fingerprint(deps=(tok,))
+    with pytest.raises(ValueError, match="fingerprint time"):
+        ctx.resolved(tok)
+
+
+def test_a_fingerprint_context_recognizes_the_values_it_stands_in_for():
+    tok = dclm_tokens()
+    ctx = StepContext.for_fingerprint(["tpu"], deps=(tok,))
+    pulled = [ctx.output_path, ctx.prefix, ctx.runtime_arg("tpu"), ctx.artifact_path(tok)]
+    assert all(ctx.is_context_value(value) for value in pulled)
+    assert ctx.is_context_value(f"{ctx.output_path}/hf")  # a path derived from one
+    assert not ctx.is_context_value("llama3")
+    assert not StepContext.for_run("out", "prefix", deps=(tok,)).is_context_value("out")
+
+
+def test_undeclared_dependency_is_rejected():
+    """Resolving a handle the step did not list in ``deps`` is a fail-fast bug, not a silent read."""
+    orphan = dclm_tokens()
+    forgot_to_declare = ArtifactStep(
+        name="checkpoints/bad",
+        version="2026.06.28",
+        artifact_type=Ckpt,
+        run=_make_ckpt,
+        build_config=lambda ctx: TrainCfg(out=ctx.output_path, data=ctx.artifact_path(orphan), lr=1e-3, steps=1),
+        deps=(),
+    )
+    with pytest.raises(ValueError, match="not a declared dependency"):
+        materialized_config(forgot_to_declare, "/data/b")
+
+
+# --- apply: the keyword-input single-step builder ------------------------------
+
+
+def _stage(output_path: str) -> None:
+    os.makedirs(output_path, exist_ok=True)
+    with open(os.path.join(output_path, "data.txt"), "w") as f:
+        f.write("staged")
+
+
+def _transform(input_path: str, output_path: str) -> None:
+    os.makedirs(output_path, exist_ok=True)
+    with open(os.path.join(input_path, "data.txt")) as f:
+        content = f.read()
+    with open(os.path.join(output_path, "data.txt"), "w") as f:
+        f.write(content.upper())
+
+
+def test_apply_chains_steps_by_direct_call(tmp_path, monkeypatch):
+    monkeypatch.setenv("REPRO_PREFIX", str(tmp_path))
+
+    staged = apply("raw/massive", _stage, version="2026.06.28", output_path=OUT)
+    parts = apply("data/massive", _transform, version="2026.06.28", input_path=staged, output_path=OUT)
+    run(parts)
+
+    with open(tmp_path / "data" / "massive" / "2026.06.28" / "data.txt") as f:
+        assert f.read() == "STAGED"
+
+
+def test_apply_lazy_dep_and_literal_both_bear_identity():
+    a = apply("data/x", _transform, version="2026.06.28", input_path="p", output_path=OUT)
+    b = apply("data/x", _transform, version="2026.06.28", input_path="q", output_path=OUT)
+    # A literal input change forks identity.
+    assert a.fingerprint() != b.fingerprint()
+
+
+def test_apply_collects_lazy_deps():
+    staged = apply("raw/massive", _stage, version="2026.06.28", output_path=OUT)
+    parts = apply("data/massive", _transform, version="2026.06.28", input_path=staged, output_path=OUT)
+    assert parts.deps == (staged,)
+
+
+def test_apply_rejects_unbindable_inputs():
+    def f(a):
+        return a
+
+    with pytest.raises(TypeError):
+        apply("x/y", f, version="2026.06.28", a=1, b=2)
+
+
+DEV_RUN = "accept-20261012-201822-60b9-dev"
+
+
+def _train(out: str) -> None:
+    os.makedirs(out, exist_ok=True)
+    with open(os.path.join(out, "weights"), "w") as f:
+        f.write("trained")
+
+
+def _never_built() -> None:
+    raise AssertionError("a pinned run is never built")
+
+
+def _score(run_dir: str) -> Artifact:
+    with open(os.path.join(run_dir, "weights")) as f:
+        assert f.read() == "trained"
+    return Artifact()
+
+
+def test_a_calendar_step_may_depend_on_a_pinned_dev_run(tmp_path, monkeypatch):
+    monkeypatch.setenv("REPRO_PREFIX", str(tmp_path))
+    trained = apply("toy/run", _train, version=DEV_RUN, out=OUT)
+    run(trained)
+    pinned = apply("toy/run", _never_built, version=DEV_RUN, pin=trained.path())
+    run(apply("eval/toy", _score, version="2026.10.13", run_dir=pinned))
+
+
+def test_a_calendar_step_refuses_an_unpinned_dev_dependency():
+    trained = apply("toy/run", _train, version=DEV_RUN, out=OUT)
+    with pytest.raises(ValueError, match="mutable"):
+        apply("eval/toy", _score, version="2026.10.13", run_dir=trained)
+
+
+def test_evaluating_a_pinned_dev_run_leaves_it_untouched(tmp_path, monkeypatch):
+    monkeypatch.setenv("REPRO_PREFIX", str(tmp_path))
+    trained = apply("toy/run", _train, version=DEV_RUN, out=OUT)
+    run(trained)
+    status_file = Path(trained.path()) / ".executor_status"
+
+    def snapshot():
+        return read_record(trained.path()), status_file.read_text(), status_file.stat().st_mtime_ns
+
+    before = snapshot()
+    pinned = apply("toy/run", _never_built, version=DEV_RUN, pin=trained.path())
+    run(apply("eval/toy", _score, version="2026.10.13", run_dir=pinned))
+    assert snapshot() == before
