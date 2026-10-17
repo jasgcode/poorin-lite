@@ -8,12 +8,17 @@ Copy it to start a project; the copy is yours.
 ## Start a project
 
 ```bash
-cp -r poorin-lite my-project && cd my-project
+git clone poorin-lite my-project && cd my-project
 rm -rf .git && git init -b main
-git mv src/project src/my_project   # then update `packages` in pyproject.toml and the imports
+mv src/project src/my_project
+# Rename `project` to `my_project` in pyproject.toml (`packages`, isort's `known-first-party`)
+# and in the imports (`from project.toy import ...`), and set `[project] name`.
 uv sync
 uv run pytest
 ```
+
+Clone rather than copy: a copied `.venv` keeps scripts that run the template's interpreter and
+its installed packages, and a copy brings along `artifacts/`.
 
 `repro/settings.py` holds the names a project may change: the prefix variable (`REPRO_PREFIX`,
 default `./artifacts`) and the git ref namespace for dev snapshots.
