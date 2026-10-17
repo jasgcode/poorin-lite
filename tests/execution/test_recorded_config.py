@@ -4,6 +4,8 @@
 """Reading a recorded config value back into its dataclass (repro.execution.recorded_config)."""
 
 import json
+import subprocess
+import sys
 from dataclasses import dataclass, field
 
 import pytest
@@ -66,3 +68,26 @@ def test_a_field_the_class_no_longer_has_is_refused():
 def test_a_recorded_class_that_is_not_the_declared_one_is_refused():
     with pytest.raises(ValueError, match="adam"):
         decode_recorded(Clip, _recorded(AdamConfig()))
+
+
+# Draccus codecs are registered process-wide, so the test decodes in an interpreter that imports
+# nothing but the decoder: a codec registered elsewhere (by the launcher) cannot mask a missing one.
+_DECODE_A_RECORDED_TIMEDELTA = """
+import dataclasses, datetime, json
+from repro.execution.fingerprint import canonical_json
+from repro.execution.recorded_config import decode_recorded
+
+@dataclasses.dataclass(frozen=True)
+class Schedule:
+    interval: datetime.timedelta
+
+recorded = json.loads(canonical_json(Schedule(datetime.timedelta(minutes=10))))
+assert decode_recorded(Schedule, recorded).interval == datetime.timedelta(minutes=10)
+"""
+
+
+def test_a_recorded_timedelta_decodes_without_the_launcher_imported():
+    result = subprocess.run(
+        [sys.executable, "-c", _DECODE_A_RECORDED_TIMEDELTA], capture_output=True, text=True, timeout=60
+    )
+    assert result.returncode == 0, result.stderr

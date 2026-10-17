@@ -16,7 +16,6 @@ import difflib
 import itertools
 import re
 from dataclasses import dataclass, field
-from datetime import timedelta
 from typing import Any, TypeVar
 
 import draccus
@@ -30,21 +29,6 @@ from repro.execution.recorded_config import field_types
 
 T = TypeVar("T")
 
-
-def _decode_timedelta(value: Any) -> timedelta:
-    """Seconds (what ``--set`` passes) or the fingerprint's ``{days, seconds, microseconds}`` (a recorded config)."""
-    if isinstance(value, dict):
-        return timedelta(**value)
-    return timedelta(seconds=float(value))
-
-
-def _encode_timedelta(value: timedelta) -> dict[str, int]:
-    return {"days": value.days, "seconds": value.seconds, "microseconds": value.microseconds}
-
-
-# Draccus has no timedelta codec, and configs fingerprint timedeltas, so --set and recorded configs need one.
-draccus.decode.register(timedelta, _decode_timedelta)
-draccus.encode.register(timedelta, _encode_timedelta)
 
 # A value that may appear in an artifact's name as written; any other value names the trial by digest.
 _PLAIN_VALUE = re.compile(r"^[A-Za-z0-9_.+-]{1,40}$")

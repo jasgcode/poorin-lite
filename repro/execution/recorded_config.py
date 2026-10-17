@@ -14,6 +14,7 @@ own recipe this way.
 import inspect
 import types
 import typing
+from datetime import timedelta
 from typing import Any, TypeVar
 
 import draccus
@@ -22,6 +23,23 @@ from draccus.choice_types import CHOICE_TYPE_KEY, ChoiceRegistryBase
 from repro.execution.fingerprint import CLASS_KEY, class_label
 
 T = TypeVar("T")
+
+
+def _decode_timedelta(value: Any) -> timedelta:
+    """Seconds (what ``--set`` passes) or the fingerprint's ``{days, seconds, microseconds}`` (a recorded config)."""
+    if isinstance(value, dict):
+        return timedelta(**value)
+    return timedelta(seconds=float(value))
+
+
+def _encode_timedelta(value: timedelta) -> dict[str, int]:
+    return {"days": value.days, "seconds": value.seconds, "microseconds": value.microseconds}
+
+
+# Draccus has no timedelta codec, and configs fingerprint timedeltas, so recorded configs and --set
+# (whose overrides decode through this module) need one.
+draccus.decode.register(timedelta, _decode_timedelta)
+draccus.encode.register(timedelta, _encode_timedelta)
 
 
 def field_types(cls: type) -> dict[str, Any]:
