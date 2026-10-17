@@ -27,7 +27,7 @@ default `./artifacts`) and the git ref namespace for dev snapshots.
 
 | Path | Holds |
 |---|---|
-| `repro/` | the workflow: artifacts, the launcher, run references, evaluation |
+| `repro/` | the workflow: artifacts, the launcher, run references, evaluation ([design and API](repro/README.md)) |
 | `src/project/` | your code: models, environments, losses, checkpoint types, suites |
 | `experiments/` | pipelines that wire `src/` code into artifact steps |
 | `tests/` | tests for all three |
