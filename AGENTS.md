@@ -15,6 +15,9 @@ uv run ruff check --fix . && uv run ruff format .
 
 # Type checking: errors and warnings fail
 uvx ty@0.0.84 check --error-on-warning
+
+# Regenerate docs/index.md after changing anything under docs/ (the tests check it)
+uv run python -m repro.docs
 ```
 
 - Python >= 3.13.
@@ -23,6 +26,21 @@ uvx ty@0.0.84 check --error-on-warning
 - Commit before running a calendar-versioned experiment: `--run` refuses to build one from
   uncommitted code. A dev run saves uncommitted code as a snapshot commit.
   `uv run python -m repro.experiment.runs show NAME@VERSION` shows the code behind a run.
+
+## Project docs
+
+`docs/` holds the project's decisions, experiments, and designs; `docs/README.md` has the full
+rules and a template for each kind.
+
+- Read `docs/index.md` at the start of a task. Open only the files it points to.
+- Add a decision (`docs/decisions/NNNN-<slug>.md`) when a change chooses between options, in the
+  same commit as the change. Never rewrite a past decision; supersede it with a new one.
+- Work on an experiment through its file. Open `docs/experiments/<slug>.md` before its first run,
+  launch with `--experiment <slug>`, append dated entries to its `Log` as results arrive, and close
+  it with a `Conclusion` that cites runs by `name@version`. A dead end closes too, saying why.
+- Write specs and implementation plans to `docs/designs/` (`YYYY-MM-DD-<slug>-design.md`,
+  `YYYY-MM-DD-<slug>-plan.md`), not to the repository root or `docs/superpowers/`.
+- Run `uv run python -m repro.docs` before committing a change under `docs/`.
 
 ## Communication & Commits
 
