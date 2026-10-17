@@ -9,8 +9,8 @@ checkout. An experiment command installs the provenance of its launch with :func
 the artifacts and trackers of the jobs it runs record the same launch.
 
 A dirty tree's changes can be saved with :func:`save_snapshot`, a commit kept under
-``refs/repro/snapshots/`` (see :mod:`repro.settings`) that leaves the branch and index alone. :func:`snapshot_commits` lists
-the commits those refs keep, and :func:`delete_snapshot_ref` drops one.
+``refs/repro/snapshots/`` (see :mod:`repro.settings`) that leaves the branch and index alone.
+:func:`snapshot_commits` lists the commits those refs keep, and :func:`delete_snapshot_ref` drops one.
 """
 
 import contextlib
