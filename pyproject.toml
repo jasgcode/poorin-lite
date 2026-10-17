@@ -35,6 +35,18 @@ ignore = ["F722", "B008", "UP015", "UP046", "UP047", "A005", "E741"]
 [tool.ruff.lint.isort]
 known-first-party = ["repro", "project", "experiments", "tests"]
 
+[tool.ty.environment]
+python = ".venv"
+python-version = "3.13"
+
+[tool.ty.src]
+include = ["repro", "src", "experiments"]
+
+[tool.ty.rules]
+# Ported from Poorin, which ignores it too: frozen dataclasses checked against protocols with plain
+# attributes, and JSON unions wider than the parameter that receives them.
+invalid-argument-type = "ignore"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 timeout = 60
